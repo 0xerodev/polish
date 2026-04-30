@@ -7,6 +7,7 @@ members = [
     "crates/polish-capabilities",
     "crates/polish-docs",
     "crates/polish-live",
+    "crates/polish-server",
     "crates/polish-test",
     "crates/polish-visual",
     "crates/polish-agent",

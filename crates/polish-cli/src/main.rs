@@ -108,12 +108,54 @@ polish-live = {{ path = "../polish-live" }}
 
 fn cmd_dev(args: &[String]) {
     let port = parse_flag(args, "--port").unwrap_or("3000".into());
-    println!("Starting Polish dev server on port {port}...");
-    println!("  Live reload: enabled");
-    println!("  SSE: /live/events");
-    println!("  Docs: http://localhost:{port}/docs");
-    println!();
+    // Build first
+    let build = std::process::Command::new("cargo")
+        .args(["build", "--release"])
+        .status()
+        .expect("cargo build");
+    if !build.success() {
+        eprintln!("Build failed");
+        std::process::exit(1);
+    }
+    // Find the binary: look for any binary in target/release that isn't a test/example
+    let bin = find_app_binary().unwrap_or_else(|| {
+        eprintln!("Could not find app binary in target/release");
+        std::process::exit(1);
+    });
+    println!("Polish dev server starting on http://0.0.0.0:{port}");
+    println!("  SSE:    /live/events");
+    println!("  Docs:   http://localhost:{port}/docs");
+    println!("  Health: http://localhost:{port}/health");
+    println!("  OpenAPI: http://localhost:{port}/docs/api/openapi.json");
+    let err = std::process::Command::new(&bin)
+        .env("PORT", &port)
+        .env("RUST_LOG", "info")
+        .spawn()
+        .expect("spawn server");
+    println!("  PID: {}", err.id());
     println!("Press Ctrl+C to stop");
+    // Wait to keep the process alive for the user
+    std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
+}
+
+fn find_app_binary() -> Option<std::path::PathBuf> {
+    let target = std::path::Path::new("target/release");
+    if !target.exists() { return None; }
+    let mut best: Option<std::path::PathBuf> = None;
+    for entry in std::fs::read_dir(target).ok()? {
+        let entry = entry.ok()?;
+        let p = entry.path();
+        if p.extension().is_some() { continue; } // skip .d, .rlib etc
+        let meta = std::fs::metadata(&p).ok()?;
+        if !meta.is_file() { continue; }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o111 == 0 { continue; }
+        }
+        best = Some(p);
+    }
+    best
 }
 
 fn cmd_build(_args: &[String]) {

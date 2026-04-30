@@ -1,263 +1,340 @@
-//! Polish example app — all 15 MVP acceptance criteria.
+//! Polish example server — real axum HTTP, SSE live updates, CSRF form processing.
 
-use polish_actions::{Action, ActionOutput, FieldMeta, Form, ParsedForm, Validator, CsrfStore, execute_pipeline};
-use polish_actions::components::FormComponent;
-use polish_agent::{
-    AgentRegistry, AgentAuditLog, AgentAuditEntry,
-    provider::NativeProvider,
-    registry::RegisteredAgent,
-    review::{ReviewTask, run_review},
-    ProviderKind,
-};
-use polish_capabilities::{CapabilityMatrix, CapabilityRow, Surface, SurfacePolicy, scan_html_for_leakage};
-use polish_core::{HtmlWriter, RenderContext, Render};
-use polish_docs::{DocsSite, DocsPage, DocsSection, OpenApiSpec, EndpointDoc, ResponseDoc};
-use polish_style::{StyleSheet, BuiltinTheme, render_themed_page};
-use polish_test::{SnapshotStore, CapabilityTestHarness, StateMachineHarness, assert_contains, assert_no_script_injection};
-use polish_visual::{VisualAudit, VisualReport, ReportSection};
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
-fn main() {
-    println!("=== Polish MVP Demo ===\n");
+use axum::{
+    Router,
+    extract::{Form, State},
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
+    routing::{get, post},
+};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures_util::StreamExt;
+use serde_json::json;
+use tokio_stream::wrappers::BroadcastStream;
+use tower_http::trace::TraceLayer;
 
-    // 1. Create a Polish app
-    println!("--- [1] Polish app created ---");
-    let csrf_store = CsrfStore::new();
+use polish_actions::{
+    Action, ActionOutput, CsrfStore, FieldMeta, Form as PolishForm, ParsedForm, Validator,
+    execute_pipeline,
+};
+use polish_actions::components::FormComponent;
+use polish_core::{RenderContext, escape_html};
+use polish_docs::{DocsSite, DocsPage, DocsSection, EndpointDoc, OpenApiSpec, ResponseDoc};
+use polish_live::EventKind;
+use polish_server::{LiveBus, ServerConfig};
+use polish_style::{BuiltinTheme, StyleSheet};
+
+// ── Shared app state ──────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AppState {
+    csrf: Arc<CsrfStore>,
+    bus: LiveBus,
+    openapi_json: Arc<String>,
+}
+
+// ── Security headers middleware ───────────────────────────────────────────────
+
+const CSP: &str = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
+
+fn secure_html(status: StatusCode, html: String) -> Response {
+    (
+        status,
+        [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Security-Policy", CSP),
+            ("X-Frame-Options", "DENY"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "strict-origin-when-cross-origin"),
+        ],
+        html,
+    ).into_response()
+}
+
+// ── Client-side fragment-patch JS (no external deps) ─────────────────────────
+
+const LIVE_JS: &str = r#"<script>
+(function(){
+  var es = new EventSource('/live/events');
+  es.addEventListener('fragment', function(e){
+    var f = JSON.parse(e.data);
+    var el = document.getElementById(f.target);
+    if (!el) return;
+    // Parse HTML safely via template to avoid innerHTML XSS surface
+    var tmpl = document.createElement('template');
+    tmpl.innerHTML = f.html;
+    if (f.op === 'replace') el.replaceWith(tmpl.content.firstChild || el);
+    else if (f.op === 'append')  el.appendChild(tmpl.content.firstChild);
+    else if (f.op === 'prepend') el.prepend(tmpl.content.firstChild);
+    else if (f.op === 'remove')  el.remove();
+  });
+  es.addEventListener('heartbeat', function(){ });
+  es.onerror = function(){ setTimeout(function(){ location.reload(); }, 3000); };
+})();
+</script>"#;
+
+// ── Page renderer ─────────────────────────────────────────────────────────────
+
+fn themed_page(title: &str, body_html: &str, include_live: bool) -> String {
     let theme = BuiltinTheme::GlassHud.theme();
     let css = StyleSheet::generate(&theme);
-    println!("    Theme: GlassHud, CSS: {} bytes", css.css.len());
+    let live_script = if include_live { LIVE_JS } else { "" };
+    format!(r#"<!DOCTYPE html>
+<html lang="en" class="{tc}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>{css}</style>
+</head>
+<body>
+{body}
+{live}
+</body>
+</html>"#,
+        tc = css.theme_class,
+        css = css.css,
+        title = escape_html(title),
+        body = body_html,
+        live = live_script,
+    )
+}
 
-    // 2. Define a page in Rust
-    println!("\n--- [2] Page defined in Rust ---");
-    let page = DocsPage::new("Order Form", "order-form");
-    println!("    Page: {}", page.title);
+// ── Routes ────────────────────────────────────────────────────────────────────
 
-    // 3. Define a form in Rust
-    println!("\n--- [3] Form defined in Rust ---");
-    let name_meta = FieldMeta::new("name", "Full Name").required().placeholder("Alice Smith");
-    let email_meta = FieldMeta::new("email", "Email").required().email().placeholder("alice@example.com");
-    let amount_meta = FieldMeta::new("amount", "Amount (USD)").required().number().placeholder("100");
-    let form_def = Form::new("order-form", "/submit")
-        .field(name_meta)
-        .field(email_meta)
-        .field(amount_meta);
-    println!("    Fields: {} defined", form_def.fields.len());
-
-    // 4. Define a server action in Rust
-    println!("\n--- [4] Server action defined in Rust ---");
-    let validator = Validator::new()
-        .required("name").min_len("name", 2).max_len("name", 100)
-        .required("email").email("email")
-        .required("amount").numeric("amount").min_value("amount", 1.0).max_value("amount", 10000.0);
-    println!("    Validator: name + email + amount (8 rules)");
-
-    // 5. Render responsive HTML/CSS
-    println!("\n--- [5] Responsive HTML/CSS rendered ---");
+async fn index_handler(State(state): State<AppState>) -> Response {
+    let token = state.csrf.issue("anon");
+    let form_def = make_form();
     let ctx = RenderContext::default();
-    let mut writer = HtmlWriter::new();
-    writer.open("div");
-    writer.open("h1");
-    writer.text("Welcome to Polish");
-    writer.close("h1");
-    writer.close("div");
-    let fragment = writer.finish();
-    println!("    Fragment: {} chars, has h1: {}", fragment.len(), fragment.contains("<h1>"));
-
-    // 6. Submit form with no JS (pure HTML POST form)
-    println!("\n--- [6] Form renders with no-JS POST ---");
-    let csrf_token = csrf_store.issue("session-abc");
-    let form_component = FormComponent { form: &form_def, csrf_token: Some(&csrf_token), submit_label: "Submit Order" };
-    let form_html = form_component.to_html(&ctx);
-    println!("    Form HTML: {} chars", form_html.len());
-    println!("    Has POST method: {}", form_html.contains("method=\"POST\""));
-    println!("    Has CSRF hidden: {}", form_html.contains("_csrf"));
-    println!("    No <script> tags: {}", !form_html.contains("<script"));
-
-    // Produce a fully styled form page
-    let page_body = format!(
-        r#"<div class="p-container" style="max-width:480px;margin:4rem auto"><div class="p-card">{}</div></div>"#,
-        form_html
+    use polish_core::Render;
+    let form_html = FormComponent { form: &form_def, csrf_token: Some(&token), submit_label: "Place Order" }
+        .to_html(&ctx);
+    let body = format!(
+        r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
+  <div class="p-card">
+    <h1 style="margin-bottom:1.5rem">Order Form</h1>
+    <div id="result"></div>
+    {form}
+  </div>
+</div>"#,
+        form = form_html
     );
-    let styled_page = render_themed_page("Order Form — Polish Demo", &page_body, &theme);
-    std::fs::write("/tmp/polish_form.html", &styled_page).expect("write form page");
-    println!("    Themed page saved: /tmp/polish_form.html ({} chars)", styled_page.len());
+    secure_html(StatusCode::OK, themed_page("Order Form — Polish", &body, true))
+}
 
-    // 7. Validate server-side
-    println!("\n--- [7] Server-side validation ---");
-    let valid_raw = format!("name=Alice+Smith&email=alice%40example.com&amount=500&_csrf={}", csrf_token.value);
-    let parsed_valid = ParsedForm::from_query(&valid_raw);
-    let valid_errors = validator.validate(&parsed_valid);
-    println!("    Valid submission errors: {} (expect 0)", valid_errors.len());
+async fn submit_handler(
+    State(state): State<AppState>,
+    Form(fields): Form<HashMap<String, String>>,
+) -> Response {
+    let parsed = ParsedForm(fields);
+    let validator = make_validator();
+    let bus = state.bus.clone();
 
-    let invalid_raw = "name=A&email=notanemail&amount=-5";
-    let parsed_invalid = ParsedForm::from_query(invalid_raw);
-    let invalid_errors = validator.validate(&parsed_invalid);
-    println!("    Invalid submission errors: {} fields", invalid_errors.len());
-
-    // 8. Render success/error result via execute_pipeline
-    println!("\n--- [8] Success/error HTML via execute_pipeline ---");
-    let csrf_token2 = csrf_store.issue("session-abc");
-    let valid_raw2 = format!("name=Alice+Smith&email=alice%40example.com&amount=500&_csrf={}", csrf_token2.value);
-    let parsed2 = ParsedForm::from_query(&valid_raw2);
-    let pipeline_result = execute_pipeline(&parsed2, &csrf_store, &validator, |form| {
-        let name = form.get_or_empty("name");
-        let amount = form.get_or_empty("amount");
+    let result = execute_pipeline(&parsed, &state.csrf, &validator, |form| {
+        let name   = escape_html(form.get_or_empty("name"));
+        let amount = escape_html(form.get_or_empty("amount"));
         Ok(Action::replace(format!(
-            r#"<div class="p-result-strip p-ok">Order placed: {} — ${}</div>"#, name, amount
+            r#"<div class="p-result-strip p-ok" id="result">
+              <strong>Order placed!</strong> {name} — ${amount}
+            </div>"#
         )))
     });
-    let success_html = match pipeline_result {
-        Ok(r) => match r.outcome {
-            ActionOutput::Replace { page_html } => page_html,
-            _ => String::new(),
-        },
-        Err(e) => format!("<div class=\"p-result-strip p-err\">{}</div>", e.user_message()),
-    };
-    let error_form = form_def.clone().with_errors(invalid_errors);
-    let error_html = FormComponent { form: &error_form, csrf_token: None, submit_label: "Submit" }.to_html(&ctx);
-    println!("    Pipeline success HTML: {} chars (result-ok: {})", success_html.len(), success_html.contains("p-ok"));
-    println!("    Error HTML: {} chars (has field errors: {})", error_html.len(), error_html.contains("p-error"));
 
-    // Save themed error page
-    let error_body = format!(r#"<div class="p-container" style="max-width:480px;margin:4rem auto"><div class="p-card">{}</div></div>"#, error_html);
-    let error_page = render_themed_page("Validation Error — Polish Demo", &error_body, &theme);
-    std::fs::write("/tmp/polish_error.html", &error_page).expect("write error page");
-    println!("    Error page saved: /tmp/polish_error.html");
+    match result {
+        Ok(r) => {
+            if let ActionOutput::Replace { ref page_html } = r.outcome {
+                use polish_live::LiveFragment;
+                bus.fragment(LiveFragment::replace("result", page_html.clone()));
+            }
+            let html = match r.outcome {
+                ActionOutput::Replace { page_html } => page_html,
+                _ => String::new(),
+            };
+            secure_html(StatusCode::OK, themed_page("Success — Polish",
+                &format!(r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
+                  <div class="p-card">{}<a href="/" class="p-btn" style="margin-top:1rem;display:inline-block">Back</a></div>
+                </div>"#, html),
+                false,
+            ))
+        }
+        Err(e) => {
+            let errors = make_validator().validate(&parsed);
+            let form_def = make_form().with_errors(errors);
+            let csrf_token = state.csrf.issue("anon");
+            let ctx = RenderContext::default();
+            use polish_core::Render;
+            let form_html = FormComponent {
+                form: &form_def,
+                csrf_token: Some(&csrf_token),
+                submit_label: "Place Order",
+            }.to_html(&ctx);
+            let body = format!(
+                r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
+                  <div class="p-card">
+                    <h1 style="margin-bottom:1.5rem">Order Form</h1>
+                    <div class="p-result-strip p-err" style="margin-bottom:1rem">{}</div>
+                    <div id="result"></div>
+                    {}
+                  </div>
+                </div>"#,
+                escape_html(&e.user_message()), form_html
+            );
+            secure_html(StatusCode::BAD_REQUEST, themed_page("Error — Polish", &body, true))
+        }
+    }
+}
 
-    // 9. Generate docs
-    println!("\n--- [9] Documentation generated ---");
-    let docs_site = DocsSite::new("Polish Demo")
-        .page(
-            DocsPage::new("Getting Started", "getting-started")
-                .section(DocsSection::new("Overview", "overview").content("Polish is a Rust-first frontend platform."))
-                .section(DocsSection::new("Forms", "forms").content("Forms are defined in Rust and validated server-side."))
-        )
-        .page(
-            DocsPage::new("API Reference", "api-reference")
-                .section(DocsSection::new("Actions", "actions").content("Server actions process form submissions securely."))
-        );
-    println!("    Pages: {}, First page: {}", docs_site.pages.len(), docs_site.pages[0].title);
+async fn sse_handler(State(state): State<AppState>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.bus.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| async move {
+        let event = msg.ok()?;
+        let mut e = Event::default().data(event.data);
+        if event.kind != EventKind::Message {
+            e = e.event(event.kind.as_str().to_string());
+        }
+        Some(Ok::<Event, Infallible>(e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
 
-    // 10. Generate OpenAPI
-    println!("\n--- [10] OpenAPI 3.1.0 generated ---");
-    let openapi = OpenApiSpec::new("Polish Demo API", "0.1.0")
+async fn health_handler() -> Json<serde_json::Value> {
+    Json(json!({"ok": true, "service": "polish-example"}))
+}
+
+async fn openapi_handler(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [
+            ("Content-Type", "application/json"),
+            ("Cache-Control", "public, max-age=300"),
+        ],
+        state.openapi_json.as_ref().clone(),
+    )
+}
+
+async fn docs_handler() -> Response {
+    let docs_site = DocsSite::new("Polish Docs")
+        .page(DocsPage::new("Getting Started", "getting-started")
+            .section(DocsSection::new("Overview", "overview")
+                .content("Polish is a Rust-first, server-authoritative frontend platform. The server renders HTML; the browser just displays it."))
+            .section(DocsSection::new("Forms", "forms")
+                .content("Forms are defined in Rust and validated server-side. No client-side validation JS required. CSRF protection is automatic."))
+            .section(DocsSection::new("Live Updates", "live")
+                .content("Real-time DOM patches are pushed via SSE. Server calls bus.fragment() to update any element by ID.")))
+        .page(DocsPage::new("API Reference", "api-reference")
+            .section(DocsSection::new("Actions", "actions")
+                .content("execute_pipeline(): CSRF check → validate → handler → ActionResult. One call does it all.")));
+
+    let mut body = String::from(r#"<div class="p-container" style="max-width:780px;margin:4rem auto">"#);
+    body.push_str(&format!("<h1>{}</h1>", escape_html(&docs_site.title)));
+    for page in &docs_site.pages {
+        body.push_str(&format!("<h2>{}</h2>", escape_html(&page.title)));
+        for section in &page.sections {
+            body.push_str(&format!(
+                r#"<div class="p-card" style="margin-bottom:1.5rem"><h3>{}</h3><p>{}</p></div>"#,
+                escape_html(&section.title), escape_html(&section.content)
+            ));
+        }
+    }
+    body.push_str("</div>");
+    secure_html(StatusCode::OK, themed_page("Polish Docs", &body, false))
+}
+
+async fn not_found_handler() -> Response {
+    secure_html(StatusCode::NOT_FOUND,
+        themed_page("Not Found — Polish",
+            r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
+               <div class="p-card"><h1>404</h1><p>Page not found.</p><a href="/">Home</a></div>
+               </div>"#,
+            false))
+}
+
+// ── Form / validator factories ────────────────────────────────────────────────
+
+fn make_form() -> PolishForm {
+    PolishForm::new("order-form", "/submit")
+        .field(FieldMeta::new("name", "Full Name").required().placeholder("Alice Smith"))
+        .field(FieldMeta::new("email", "Email").required().email().placeholder("alice@example.com"))
+        .field(FieldMeta::new("amount", "Amount (USD)").required().number().placeholder("100"))
+}
+
+fn make_validator() -> Validator {
+    Validator::new()
+        .required("name").min_len("name", 2).max_len("name", 100)
+        .required("email").email("email")
+        .required("amount").numeric("amount").min_value("amount", 1.0).max_value("amount", 10000.0)
+}
+
+fn build_openapi() -> String {
+    OpenApiSpec::new("Polish Demo API", "0.1.0")
         .server("http://localhost:3000")
         .endpoint(
-            EndpointDoc::new("POST", "/submit", "Submit order form")
-                .tag("forms")
-                .response(ResponseDoc { status: 200, description: "Success".into(), schema: None, example: None })
-                .response(ResponseDoc { status: 422, description: "Validation error".into(), schema: None, example: None })
+            EndpointDoc::new("GET", "/", "Render order form")
+                .tag("pages")
+                .response(ResponseDoc { status: 200, description: "HTML page".into(), schema: None, example: None }),
         )
         .endpoint(
-            EndpointDoc::new("GET", "/docs/api/openapi.json", "OpenAPI spec")
-                .tag("docs")
-                .response(ResponseDoc { status: 200, description: "OpenAPI 3.1.0 JSON".into(), schema: None, example: None })
-        );
-    let openapi_json = openapi.to_openapi_json().to_string();
-    println!("    OpenAPI JSON: {} chars, has paths: {}", openapi_json.len(), openapi_json.contains("\"paths\""));
+            EndpointDoc::new("POST", "/submit", "Submit order form (CSRF + validation)")
+                .tag("actions")
+                .response(ResponseDoc { status: 200, description: "Success HTML".into(), schema: None, example: None })
+                .response(ResponseDoc { status: 400, description: "Validation error HTML".into(), schema: None, example: None }),
+        )
+        .endpoint(
+            EndpointDoc::new("GET", "/live/events", "SSE live event stream (fragments + heartbeat)")
+                .tag("live")
+                .response(ResponseDoc { status: 200, description: "text/event-stream".into(), schema: None, example: None }),
+        )
+        .endpoint(
+            EndpointDoc::new("GET", "/health", "Health check")
+                .tag("ops")
+                .response(ResponseDoc { status: 200, description: r#"{"ok":true}"#.into(), schema: None, example: None }),
+        )
+        .to_openapi_json()
+        .to_string()
+}
 
-    // 11. Run tests
-    println!("\n--- [11] Tests ---");
-    let snapshot_store = SnapshotStore::new("/tmp/polish-snapshots", true);
-    snapshot_store.assert_matches("form_html", &form_html).expect("snapshot");
-    CapabilityTestHarness::new().forbid("SECRET_KEY").check_html(&form_html).assert_clean().expect("no leakage");
-    assert_contains(&form_html, "name=").expect("name field");
-    assert_no_script_injection(&form_html).expect("no XSS");
+// ── Main ──────────────────────────────────────────────────────────────────────
 
-    #[derive(Clone, Eq, PartialEq, Debug)]
-    enum OrderState { Draft, Submitted, Confirmed, Shipped }
-    #[derive(Clone, Eq, PartialEq, Debug)]
-    enum OrderEvent { Submit, Confirm, Ship }
-    let mut sm = StateMachineHarness::new(OrderState::Draft)
-        .allow(OrderState::Draft, OrderEvent::Submit, OrderState::Submitted)
-        .allow(OrderState::Submitted, OrderEvent::Confirm, OrderState::Confirmed)
-        .allow(OrderState::Confirmed, OrderEvent::Ship, OrderState::Shipped);
-    sm.send(OrderEvent::Submit).unwrap();
-    sm.send(OrderEvent::Confirm).unwrap();
-    sm.send(OrderEvent::Ship).unwrap();
-    sm.assert_state(&OrderState::Shipped).unwrap();
-    println!("    All tests: passed (snapshot, leakage, XSS, state machine)");
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .init();
 
-    // 12. Enforce capability leakage rules
-    println!("\n--- [12] Capability leakage enforcement ---");
-    let matrix = CapabilityMatrix::new()
-        .add_row(CapabilityRow::new("user")
-            .add("internal_secret", "secret_store", SurfacePolicy::new(Surface::NeverUi, "internal_secret", "never expose")));
-    let clean = scan_html_for_leakage("<div>Order: $500</div>", &matrix);
-    let leaked = scan_html_for_leakage("<div>internal_secret: xyz</div>", &matrix);
-    println!("    Clean HTML: {} violations", clean.violations.len());
-    println!("    Leaked HTML violations: {}", leaked.violations.len());
+    let config = ServerConfig::new().port(3000);
+    let bus = LiveBus::new(config.live_bus_capacity);
+    let state = AppState {
+        csrf: Arc::new(CsrfStore::new()),
+        bus: bus.clone(),
+        openapi_json: Arc::new(build_openapi()),
+    };
 
-    // 13. Add an agent provider
-    println!("\n--- [13] Agent provider registered ---");
-    let registry = AgentRegistry::new();
-    registry.register_provider("native", Arc::new(NativeProvider::new()));
-    registry.register_agent(RegisteredAgent {
-        id: "code-reviewer".into(), name: "Code Reviewer".into(),
-        description: "Reviews code for quality and security".into(),
-        provider_kind: ProviderKind::Native, capabilities: vec!["code_review".into()], enabled: true,
+    // Heartbeat task
+    let hb_bus = bus.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            hb_bus.heartbeat();
+        }
     });
-    println!("    Providers: {}, Agents: {}", registry.provider_count(), registry.agent_count());
 
-    // 14. Run an agent review task
-    println!("\n--- [14] Agent review task executed ---");
-    let review_task = ReviewTask::new("Polish form component")
-        .with_context(format!("html_len={}", form_html.len()))
-        .with_instruction("Check for XSS vulnerabilities".to_string())
-        .with_instruction("Check for CSRF protection".to_string());
-    let provider = registry.get_provider("native").unwrap();
-    let prompt = format!("Review for security:\n{}\nInstructions: {}", &form_html[..200.min(form_html.len())], review_task.instructions.join("; "));
-    let output = provider.complete(&prompt).unwrap();
-    let review_result = run_review(&review_task, &output);
-    let mut audit_log = AgentAuditLog::new(1000);
-    audit_log.log(AgentAuditEntry::new("review-1", "code-reviewer", "review", "completed").with_detail(format!("findings={}", review_result.findings.len())));
-    println!("    Review passed: {}, findings: {}, audit entries: {}", review_result.passed, review_result.findings.len(), audit_log.len());
+    let app = Router::new()
+        .route("/", get(index_handler))
+        .route("/submit", post(submit_handler))
+        .route("/live/events", get(sse_handler))
+        .route("/health", get(health_handler))
+        .route("/docs/api/openapi.json", get(openapi_handler))
+        .route("/docs", get(docs_handler))
+        .fallback(not_found_handler)
+        .with_state(state)
+        .layer(TraceLayer::new_for_http());
 
-    // 15. Produce a visual screenshot report
-    println!("\n--- [15] Visual screenshot report produced ---");
-    let audit_result = VisualAudit::full().audit_html(&form_html);
-    let mut report = VisualReport::new("Polish MVP Visual Report");
-    report.add_section(ReportSection::pass("Form render", "Form HTML rendered without JS").with_detail(format!("{} chars", form_html.len())));
-    report.add_section(ReportSection::pass("No-JS POST", "POST action, no script tags"));
-    report.add_section(ReportSection::pass("CSRF protection", "Single-use CSRF token embedded"));
-    report.add_section(ReportSection::pass("Server validation", "Pipeline: CSRF→validate→execute"));
-    report.add_section(ReportSection::pass("Capability leakage", "0 violations in clean HTML"));
-    report.add_section(ReportSection::pass("Themed pages", "GlassHud pages written to /tmp"));
-    report.add_section(if audit_result.passed {
-        ReportSection::pass("Visual audit", &format!("Score: {:.0}/100", audit_result.score))
-    } else {
-        ReportSection::warn("Visual audit", &format!("Score: {:.0}/100", audit_result.score))
-    });
-    report.add_section(ReportSection::pass("Agent review", &format!("{} findings, audit logged", review_result.findings.len())));
-    report.add_section(ReportSection::pass("OpenAPI docs", &format!("{} chars generated", openapi_json.len())));
-
-    let report_html = report.to_html();
-    std::fs::write("/tmp/polish_visual_report.html", &report_html).unwrap();
-    println!("    Report: {} sections, overall: {}", report.sections.len(), report.overall_status.as_str());
-
-    println!("\n=== Polish MVP: ALL 15 CRITERIA SATISFIED ===\n");
-    for (i, check) in [
-        "Polish app created with GlassHud theme (8,267 bytes CSS)",
-        "Page defined in Rust (DocsPage, PageMeta builder)",
-        "Form defined in Rust (3 typed fields with validators)",
-        "Server action defined (Validator pipeline, 8 rules)",
-        "Responsive HTML/CSS rendered (full CSS design system)",
-        "Form submits with no JS — pure HTML POST, CSRF embedded",
-        "Server-side validation — valid→0 errors, invalid→3 field errors",
-        "Success/error rendered via execute_pipeline (CSRF→validate→execute)",
-        "Docs generated (2 pages, 3 sections)",
-        "OpenAPI 3.1.0 generated (2 endpoints)",
-        "Tests: snapshot, leakage, XSS assert, state machine — all pass",
-        "Capability leakage enforced — NeverUi detected in HTML scan",
-        "Agent provider registered (native + code-reviewer)",
-        "Agent review executed + audit logged",
-        "Visual report at /tmp/polish_visual_report.html — PASS",
-    ].iter().enumerate() {
-        println!("{:2}. [PASS] {}", i + 1, check);
-    }
-
-    println!("\nOutput files:");
-    println!("  /tmp/polish_form.html       — Themed form page (GlassHud)");
-    println!("  /tmp/polish_error.html      — Themed error page with field errors");
-    println!("  /tmp/polish_visual_report.html — Visual verification report");
+    let addr = config.addr();
+    tracing::info!("Polish listening on http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
+    axum::serve(listener, app).await.expect("serve");
 }
