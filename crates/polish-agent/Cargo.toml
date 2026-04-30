@@ -1,0 +1,16 @@
+[package]
+name = "polish-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+polish-actions = { path = "../polish-actions" }
+polish-capabilities = { path = "../polish-capabilities" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

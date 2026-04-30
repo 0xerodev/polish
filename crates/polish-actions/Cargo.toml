@@ -1,0 +1,18 @@
+[package]
+name = "polish-actions"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+polish-style = { path = "../polish-style" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "polish-visual"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+polish-test = { path = "../polish-test" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

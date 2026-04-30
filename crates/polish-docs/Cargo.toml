@@ -1,0 +1,12 @@
+[package]
+name = "polish-docs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+polish-actions = { path = "../polish-actions" }
+polish-capabilities = { path = "../polish-capabilities" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }

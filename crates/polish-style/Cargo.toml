@@ -1,0 +1,9 @@
+[package]
+name = "polish-style"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+serde = { workspace = true }
+indexmap = { workspace = true }
