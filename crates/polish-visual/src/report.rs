@@ -1,6 +1,6 @@
 use crate::diff::DiffResult;
 use crate::audit::AuditResult;
-use crate::capture::Screenshot;
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportStatus {

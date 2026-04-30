@@ -1,5 +1,5 @@
-use polish_core::{HtmlWriter, RenderContext, Render, RenderExt};
-use crate::site::{DocsSite, DocsPage};
+use polish_core::{HtmlWriter, RenderContext, Render};
+use crate::site::DocsSite;
 use crate::spec::EndpointDoc;
 
 struct SidebarNav<'a> {
@@ -148,7 +148,7 @@ impl<'a> Render for EndpointBlock<'a> {
             for r in &self.ep.responses {
                 out.open_tag_start("div");
                 out.attr("class", "p-result-strip");
-                let cls = if r.status < 300 { "p-ok" } else { "p-err" };
+                let _cls = if r.status < 300 { "p-ok" } else { "p-err" };
                 out.attr("style", if r.status < 300 { "background:rgba(34,197,94,0.06);border-left-color:#22c55e" } else { "background:rgba(239,68,68,0.06);border-left-color:#ef4444" });
                 out.tag_end("div");
                 out.open_tag_start("strong");

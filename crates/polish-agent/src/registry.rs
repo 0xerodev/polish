@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::provider::{AgentProvider, ProviderConfig, ProviderKind};
+use crate::provider::{AgentProvider, ProviderKind};
 
 #[derive(Debug, Clone)]
 pub struct RegisteredAgent {

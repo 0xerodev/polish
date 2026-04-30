@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+
 use crate::transition::Transition;
 use crate::error::StateError;
 use serde::{Serialize, Deserialize};

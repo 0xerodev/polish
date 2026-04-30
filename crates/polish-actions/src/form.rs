@@ -153,3 +153,30 @@ mod tests {
         assert_eq!(f.get("q"), Some("hello world"));
     }
 }
+
+use crate::validator::Validator;
+use crate::action::ActionResult;
+use crate::error::ActionError;
+use crate::csrf::CsrfStore;
+
+/// Full server-action pipeline: CSRF check → validate → user handler → ActionResult.
+pub fn execute_pipeline<F>(
+    parsed: &ParsedForm,
+    csrf_store: &CsrfStore,
+    validator: &Validator,
+    handler: F,
+) -> Result<ActionResult, ActionError>
+where
+    F: FnOnce(&ParsedForm) -> Result<ActionResult, ActionError>,
+{
+    let token = parsed.csrf_token().ok_or(ActionError::InvalidCsrf)?;
+    if !csrf_store.validate(token) {
+        return Err(ActionError::InvalidCsrf);
+    }
+    let errors = validator.validate(parsed);
+    if !errors.is_empty() {
+        let first = errors.values().next().and_then(|v| v.first()).cloned().unwrap_or_default();
+        return Err(ActionError::InvalidInput(first));
+    }
+    handler(parsed)
+}

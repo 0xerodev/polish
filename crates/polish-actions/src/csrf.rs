@@ -2,7 +2,7 @@ use rand::Rng;
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use chrono::{Utc, Duration};
+use chrono::Utc;
 
 /// A signed CSRF token (session-bound, time-limited).
 #[derive(Clone, Debug)]
