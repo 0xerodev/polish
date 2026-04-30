@@ -33,8 +33,10 @@ impl ActionTestResult {
     }
 }
 
+type ActionHandler = Box<dyn Fn(&HashMap<String, String>) -> ActionTestResult>;
+
 pub struct ActionTestHarness {
-    actions: HashMap<String, Box<dyn Fn(&HashMap<String, String>) -> ActionTestResult>>,
+    actions: HashMap<String, ActionHandler>,
 }
 
 impl ActionTestHarness {
@@ -43,7 +45,7 @@ impl ActionTestHarness {
     }
 
     pub fn register(&mut self, name: &str, handler: impl Fn(&HashMap<String, String>) -> ActionTestResult + 'static) {
-        self.actions.insert(name.to_string(), Box::new(handler));
+        self.actions.insert(name.to_string(), Box::new(handler) as ActionHandler);
     }
 
     pub fn run(&self, name: &str, fields: HashMap<String, String>) -> ActionTestResult {

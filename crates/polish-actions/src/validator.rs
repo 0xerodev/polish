@@ -18,10 +18,17 @@ impl ValidationError {
 /// Composable validators for form fields.
 pub struct Validator {
     rules: Vec<Box<dyn ValidatorRule>>,
+    labels: HashMap<String, String>,
 }
 
 impl Validator {
-    pub fn new() -> Self { Self { rules: Vec::new() } }
+    pub fn new() -> Self { Self { rules: Vec::new(), labels: HashMap::new() } }
+
+    /// Map an internal field key to a human-readable label used in error messages.
+    pub fn label(mut self, field: &str, display: &str) -> Self {
+        self.labels.insert(field.to_string(), display.to_string());
+        self
+    }
 
     pub fn required(mut self, field: &str) -> Self {
         self.rules.push(Box::new(Required { field: field.to_string() }));
@@ -75,7 +82,14 @@ impl Validator {
                 errors.entry(e.field.clone()).or_default().push(e.message.clone());
             }
         }
-        errors
+        // Apply display labels: replace first occurrence of field key in each message
+        if self.labels.is_empty() { return errors; }
+        errors.into_iter().map(|(field, msgs)| {
+            let msgs = if let Some(label) = self.labels.get(&field) {
+                msgs.into_iter().map(|m| m.replacen(&field, label, 1)).collect()
+            } else { msgs };
+            (field, msgs)
+        }).collect()
     }
 
     pub fn is_valid(&self, form: &ParsedForm) -> bool {

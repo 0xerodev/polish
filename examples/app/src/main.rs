@@ -8,7 +8,7 @@ use axum::{
     Router,
     extract::{Form, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -28,16 +28,12 @@ use polish_live::EventKind;
 use polish_server::{LiveBus, ServerConfig};
 use polish_style::{BuiltinTheme, StyleSheet};
 
-// ── Shared app state ──────────────────────────────────────────────────────────
-
 #[derive(Clone)]
 struct AppState {
     csrf: Arc<CsrfStore>,
     bus: LiveBus,
     openapi_json: Arc<String>,
 }
-
-// ── Security headers middleware ───────────────────────────────────────────────
 
 const CSP: &str = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
 
@@ -55,8 +51,6 @@ fn secure_html(status: StatusCode, html: String) -> Response {
     ).into_response()
 }
 
-// ── Client-side fragment-patch JS (no external deps) ─────────────────────────
-
 const LIVE_JS: &str = r#"<script>
 (function(){
   var es = new EventSource('/live/events');
@@ -64,7 +58,6 @@ const LIVE_JS: &str = r#"<script>
     var f = JSON.parse(e.data);
     var el = document.getElementById(f.target);
     if (!el) return;
-    // Parse HTML safely via template to avoid innerHTML XSS surface
     var tmpl = document.createElement('template');
     tmpl.innerHTML = f.html;
     if (f.op === 'replace') el.replaceWith(tmpl.content.firstChild || el);
@@ -72,35 +65,87 @@ const LIVE_JS: &str = r#"<script>
     else if (f.op === 'prepend') el.prepend(tmpl.content.firstChild);
     else if (f.op === 'remove')  el.remove();
   });
-  es.addEventListener('heartbeat', function(){ });
+  es.addEventListener('heartbeat', function(){});
   es.onerror = function(){ setTimeout(function(){ location.reload(); }, 3000); };
 })();
 </script>"#;
 
-// ── Page renderer ─────────────────────────────────────────────────────────────
+const SUBMIT_JS: &str = r#"<script>
+(function(){
+  var form = document.querySelector('form');
+  var btn  = form && form.querySelector('button[type="submit"]');
+  if (!form || !btn) return;
+  form.addEventListener('submit', function(){
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+  });
+})();
+</script>"#;
 
-fn themed_page(title: &str, body_html: &str, include_live: bool) -> String {
+fn nav(active: &str) -> String {
+    let link = |href: &str, label: &str| {
+        let active_style = if href == active {
+            " style=\"color:var(--p-accent);border-bottom:2px solid var(--p-accent);padding-bottom:2px\""
+        } else {
+            ""
+        };
+        format!(r#"<a href="{href}" class="p-nav-link"{active_style}>{label}</a>"#)
+    };
+    format!(
+        r#"<nav class="p-header" style="display:flex;align-items:center;gap:2rem;padding:1rem 2rem;border-bottom:1px solid var(--p-border);position:sticky;top:0;z-index:10;backdrop-filter:blur(8px)">
+  <span class="p-header-title" style="font-size:1.1rem;font-weight:700;letter-spacing:-0.01em">Polish</span>
+  <div style="display:flex;gap:1.5rem">
+    {order}{docs}
+  </div>
+  <div style="margin-left:auto;font-size:.75rem;color:var(--p-text2)">v0.1.0</div>
+</nav>"#,
+        order = link("/", "Order Form"),
+        docs = link("/docs", "Docs"),
+    )
+}
+
+fn themed_page(title: &str, body_html: &str, include_live: bool, active_nav: &str) -> String {
     let theme = BuiltinTheme::GlassHud.theme();
     let css = StyleSheet::generate(&theme);
     let live_script = if include_live { LIVE_JS } else { "" };
-    format!(r#"<!DOCTYPE html>
+    let submit_script = if include_live { SUBMIT_JS } else { "" };
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en" class="{tc}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
-  <style>{css}</style>
+  <style>
+{css}
+html,body{{min-height:100%;margin:0}}
+body{{display:flex;flex-direction:column;min-height:100vh}}
+.p-page-body{{flex:1;display:flex;flex-direction:column}}
+  </style>
 </head>
 <body>
+{nav}
+<div class="p-page-body">
 {body}
-{live}
+</div>
+{live}{submit}
 </body>
 </html>"#,
         tc = css.theme_class,
         css = css.css,
         title = escape_html(title),
+        nav = nav(active_nav),
         body = body_html,
         live = live_script,
+        submit = submit_script,
+    )
+}
+
+fn centered_card(content: &str) -> String {
+    format!(
+        r#"<div style="flex:1;display:flex;align-items:center;justify-content:center;padding:2rem">
+  <div class="p-card" style="width:100%;max-width:480px">{content}</div>
+</div>"#
     )
 }
 
@@ -111,19 +156,20 @@ async fn index_handler(State(state): State<AppState>) -> Response {
     let form_def = make_form();
     let ctx = RenderContext::default();
     use polish_core::Render;
-    let form_html = FormComponent { form: &form_def, csrf_token: Some(&token), submit_label: "Place Order" }
-        .to_html(&ctx);
-    let body = format!(
-        r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
-  <div class="p-card">
-    <h1 style="margin-bottom:1.5rem">Order Form</h1>
-    <div id="result"></div>
-    {form}
-  </div>
-</div>"#,
+    let form_html = FormComponent {
+        form: &form_def,
+        csrf_token: Some(&token),
+        submit_label: "Place Order",
+    }.to_html(&ctx);
+
+    let content = format!(
+        r#"<h2 style="margin:0 0 0.25rem">Order Form</h2>
+<p style="margin:0 0 1.5rem;color:var(--p-text2);font-size:.875rem">Fill in your details to place an order.</p>
+<div id="result"></div>
+{form}"#,
         form = form_html
     );
-    secure_html(StatusCode::OK, themed_page("Order Form — Polish", &body, true))
+    secure_html(StatusCode::OK, themed_page("Order Form — Polish", &centered_card(&content), true, "/"))
 }
 
 async fn submit_handler(
@@ -154,12 +200,17 @@ async fn submit_handler(
                 ActionOutput::Replace { page_html } => page_html,
                 _ => String::new(),
             };
-            secure_html(StatusCode::OK, themed_page("Success — Polish",
-                &format!(r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
-                  <div class="p-card">{}<a href="/" class="p-btn" style="margin-top:1rem;display:inline-block">Back</a></div>
-                </div>"#, html),
-                false,
-            ))
+            let content = format!(
+                r#"<div style="text-align:center;padding:0.5rem 0 1rem">
+  <div style="font-size:3rem;margin-bottom:1rem">✓</div>
+  <h2 style="margin:0 0 0.5rem">Order Placed!</h2>
+</div>
+{html}
+<div style="margin-top:1.5rem">
+  <a href="/" class="p-btn p-btn-secondary" style="width:100%;text-align:center">Place Another Order</a>
+</div>"#
+            );
+            secure_html(StatusCode::OK, themed_page("Order Placed — Polish", &centered_card(&content), false, "/"))
         }
         Err(e) => {
             let errors = make_validator().validate(&parsed);
@@ -172,18 +223,24 @@ async fn submit_handler(
                 csrf_token: Some(&csrf_token),
                 submit_label: "Place Order",
             }.to_html(&ctx);
-            let body = format!(
-                r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
-                  <div class="p-card">
-                    <h1 style="margin-bottom:1.5rem">Order Form</h1>
-                    <div class="p-result-strip p-err" style="margin-bottom:1rem">{}</div>
-                    <div id="result"></div>
-                    {}
-                  </div>
-                </div>"#,
-                escape_html(&e.user_message()), form_html
+
+            // Distinguish CSRF failures from field validation errors
+            let error_msg = match e {
+                polish_actions::ActionError::InvalidCsrf =>
+                    "Session expired. Please try again.".to_string(),
+                _ => "Please fix the errors below.".to_string(),
+            };
+
+            let content = format!(
+                r#"<h2 style="margin:0 0 0.25rem">Order Form</h2>
+<p style="margin:0 0 1.5rem;color:var(--p-text2);font-size:.875rem">Fill in your details to place an order.</p>
+<div class="p-result-strip p-err" style="margin-bottom:1rem">{err}</div>
+<div id="result"></div>
+{form}"#,
+                err = escape_html(&error_msg),
+                form = form_html
             );
-            secure_html(StatusCode::BAD_REQUEST, themed_page("Error — Polish", &body, true))
+            secure_html(StatusCode::BAD_REQUEST, themed_page("Error — Polish", &centered_card(&content), true, "/"))
         }
     }
 }
@@ -194,7 +251,7 @@ async fn sse_handler(State(state): State<AppState>) -> Sse<impl futures_util::St
         let event = msg.ok()?;
         let mut e = Event::default().data(event.data);
         if event.kind != EventKind::Message {
-            e = e.event(event.kind.as_str().to_string());
+            e = e.event(event.kind.as_str());
         }
         Some(Ok::<Event, Infallible>(e))
     });
@@ -226,33 +283,37 @@ async fn docs_handler() -> Response {
                 .content("Real-time DOM patches are pushed via SSE. Server calls bus.fragment() to update any element by ID.")))
         .page(DocsPage::new("API Reference", "api-reference")
             .section(DocsSection::new("Actions", "actions")
-                .content("execute_pipeline(): CSRF check → validate → handler → ActionResult. One call does it all.")));
+                .content("execute_pipeline(): CSRF check → validate → handler → ActionResult. One call does it all."))
+            .section(DocsSection::new("Security", "security")
+                .content("All responses include CSP, X-Frame-Options: DENY, X-Content-Type-Options: nosniff, Referrer-Policy. User input is HTML-escaped before rendering.")));
 
-    let mut body = String::from(r#"<div class="p-container" style="max-width:780px;margin:4rem auto">"#);
-    body.push_str(&format!("<h1>{}</h1>", escape_html(&docs_site.title)));
+    let mut body = r#"<div style="max-width:780px;margin:0 auto;padding:2rem">"#.to_owned();
+    body.push_str(&format!("<h1 style=\"margin-bottom:0.25rem\">{}</h1>", escape_html(&docs_site.title)));
+    body.push_str(r#"<p style="color:var(--p-text2);margin-bottom:2rem">Rust-first server-authoritative frontend platform</p>"#);
     for page in &docs_site.pages {
-        body.push_str(&format!("<h2>{}</h2>", escape_html(&page.title)));
+        body.push_str(&format!("<h2 style=\"margin:2rem 0 1rem\">{}</h2>", escape_html(&page.title)));
         for section in &page.sections {
             body.push_str(&format!(
-                r#"<div class="p-card" style="margin-bottom:1.5rem"><h3>{}</h3><p>{}</p></div>"#,
+                r#"<div class="p-card" style="margin-bottom:1rem"><h3 style="margin:0 0 0.5rem">{}</h3><p style="margin:0;color:var(--p-text2)">{}</p></div>"#,
                 escape_html(&section.title), escape_html(&section.content)
             ));
         }
     }
     body.push_str("</div>");
-    secure_html(StatusCode::OK, themed_page("Polish Docs", &body, false))
+    secure_html(StatusCode::OK, themed_page("Polish Docs", &body, false, "/docs"))
 }
 
 async fn not_found_handler() -> Response {
-    secure_html(StatusCode::NOT_FOUND,
-        themed_page("Not Found — Polish",
-            r#"<div class="p-container" style="max-width:520px;margin:4rem auto">
-               <div class="p-card"><h1>404</h1><p>Page not found.</p><a href="/">Home</a></div>
-               </div>"#,
-            false))
+    let content = r#"<div style="text-align:center;padding:1rem 0">
+  <div style="font-size:4rem;font-weight:800;color:var(--p-accent);margin-bottom:0.5rem">404</div>
+  <h2 style="margin:0 0 0.5rem">Page not found</h2>
+  <p style="color:var(--p-text2);margin:0 0 1.5rem">The page you're looking for doesn't exist.</p>
+  <a href="/" class="p-btn p-btn-primary">Go Home</a>
+</div>"#;
+    secure_html(StatusCode::NOT_FOUND, themed_page("Not Found — Polish", &centered_card(content), false, ""))
 }
 
-// ── Form / validator factories ────────────────────────────────────────────────
+// ── Factories ─────────────────────────────────────────────────────────────────
 
 fn make_form() -> PolishForm {
     PolishForm::new("order-form", "/submit")
@@ -263,6 +324,9 @@ fn make_form() -> PolishForm {
 
 fn make_validator() -> Validator {
     Validator::new()
+        .label("name", "Full Name")
+        .label("email", "Email")
+        .label("amount", "Amount")
         .required("name").min_len("name", 2).max_len("name", 100)
         .required("email").email("email")
         .required("amount").numeric("amount").min_value("amount", 1.0).max_value("amount", 10000.0)
@@ -283,7 +347,7 @@ fn build_openapi() -> String {
                 .response(ResponseDoc { status: 400, description: "Validation error HTML".into(), schema: None, example: None }),
         )
         .endpoint(
-            EndpointDoc::new("GET", "/live/events", "SSE live event stream (fragments + heartbeat)")
+            EndpointDoc::new("GET", "/live/events", "SSE live event stream")
                 .tag("live")
                 .response(ResponseDoc { status: 200, description: "text/event-stream".into(), schema: None, example: None }),
         )
@@ -312,14 +376,10 @@ async fn main() {
         openapi_json: Arc::new(build_openapi()),
     };
 
-    // Heartbeat task
     let hb_bus = bus.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(15));
-        loop {
-            interval.tick().await;
-            hb_bus.heartbeat();
-        }
+        loop { interval.tick().await; hb_bus.heartbeat(); }
     });
 
     let app = Router::new()

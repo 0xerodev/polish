@@ -13,7 +13,7 @@ impl DocsSection {
         Self { title: title.into(), slug: slug.into(), ..Default::default() }
     }
     pub fn content(mut self, c: impl Into<String>) -> Self { self.content = c.into(); self }
-    pub fn sub(mut self, s: DocsSection) -> Self { self.sub.push(s); self }
+    pub fn subsection(mut self, s: DocsSection) -> Self { self.sub.push(s); self }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -136,24 +136,6 @@ fn url_decode(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_form_query() {
-        let f = ParsedForm::from_query("amount=100&dest=0x123&_csrf=abc");
-        assert_eq!(f.get("amount"), Some("100"));
-        assert_eq!(f.csrf_token(), Some("abc"));
-    }
-
-    #[test]
-    fn url_decode_plus_space() {
-        let f = ParsedForm::from_query("q=hello+world");
-        assert_eq!(f.get("q"), Some("hello world"));
-    }
-}
-
 use crate::validator::Validator;
 use crate::action::ActionResult;
 use crate::error::ActionError;
@@ -180,3 +162,22 @@ where
     }
     handler(parsed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_form_query() {
+        let f = ParsedForm::from_query("amount=100&dest=0x123&_csrf=abc");
+        assert_eq!(f.get("amount"), Some("100"));
+        assert_eq!(f.csrf_token(), Some("abc"));
+    }
+
+    #[test]
+    fn url_decode_plus_space() {
+        let f = ParsedForm::from_query("q=hello+world");
+        assert_eq!(f.get("q"), Some("hello world"));
+    }
+}
+

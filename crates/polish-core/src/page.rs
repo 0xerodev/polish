@@ -155,7 +155,6 @@ impl Render for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::RenderExt;
 
     struct TextBody(String);
     impl Render for TextBody {

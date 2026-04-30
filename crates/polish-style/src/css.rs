@@ -133,7 +133,7 @@ impl StyleSheet {
         w.rule(".p-header", &[
             ("background", "var(--p-bg2)"),
             ("border-bottom", "1px solid var(--p-border)"),
-            ("padding", &format!("var(--p-sp-md) var(--p-sp-lg)")),
+            ("padding", "var(--p-sp-md) var(--p-sp-lg)"),
             ("display", "flex"),
             ("align-items", "center"),
             ("gap", "var(--p-sp-md)"),
@@ -192,7 +192,7 @@ impl StyleSheet {
             ("font-family", "var(--p-font)"),
             ("font-size", "var(--p-text-base)"),
             ("width", "100%"),
-            ("transition", &format!("border-color var(--p-dur-fast) var(--p-easing)")),
+            ("transition", "border-color var(--p-dur-fast) var(--p-easing)"),
             ("outline", "none"),
         ]);
 
@@ -224,7 +224,7 @@ impl StyleSheet {
             ("cursor", "pointer"),
             ("border", "none"),
             ("text-decoration", "none"),
-            ("transition", &format!("all var(--p-dur-fast) var(--p-easing)")),
+            ("transition", "all var(--p-dur-fast) var(--p-easing)"),
             ("user-select", "none"),
         ]);
 

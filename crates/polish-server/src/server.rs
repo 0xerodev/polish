@@ -1,6 +1,6 @@
 use crate::{LiveBus, ServerConfig};
 
-/// Builder for a Polish HTTP server. Consume with `.serve().await`.
+/// Builder for a Polish HTTP server.
 pub struct PolishServer {
     pub config: ServerConfig,
     pub bus: LiveBus,
@@ -11,8 +11,10 @@ impl PolishServer {
         let bus = LiveBus::new(config.live_bus_capacity);
         Self { config, bus }
     }
+}
 
-    pub fn default() -> Self {
+impl Default for PolishServer {
+    fn default() -> Self {
         Self::new(ServerConfig::default())
     }
 }

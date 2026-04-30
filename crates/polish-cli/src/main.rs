@@ -127,15 +127,15 @@ fn cmd_dev(args: &[String]) {
     println!("  Docs:   http://localhost:{port}/docs");
     println!("  Health: http://localhost:{port}/health");
     println!("  OpenAPI: http://localhost:{port}/docs/api/openapi.json");
-    let err = std::process::Command::new(&bin)
+    let mut child = std::process::Command::new(&bin)
         .env("PORT", &port)
         .env("RUST_LOG", "info")
         .spawn()
         .expect("spawn server");
-    println!("  PID: {}", err.id());
+    println!("  PID: {}", child.id());
+    let _ = child.wait();
     println!("Press Ctrl+C to stop");
     // Wait to keep the process alive for the user
-    std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
 }
 
 fn find_app_binary() -> Option<std::path::PathBuf> {
