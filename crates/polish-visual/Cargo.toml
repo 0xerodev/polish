@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+png = "0.17"
 polish-core = { path = "../polish-core" }
 polish-test = { path = "../polish-test" }
 serde = { workspace = true }

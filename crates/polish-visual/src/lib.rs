@@ -1,3 +1,4 @@
+pub mod chrome;
 pub mod capture;
 pub mod diff;
 pub mod audit;

@@ -199,35 +199,123 @@ fn cmd_docs(args: &[String]) {
 fn cmd_audit_ui(args: &[String]) {
     let url = parse_flag(args, "--url").unwrap_or("http://localhost:3000".into());
     println!("Running Polish UI audit against: {url}");
-    println!("  [capability] Scanning for leakage violations...");
-    println!("  [visual] Checking contrast ratios...");
-    println!("  [visual] Checking layout overflow...");
-    println!("  [visual] Checking alt text...");
+    let dom = match polish_visual::chrome::dump_dom(&url) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Audit FAILED: {e}");
+            std::process::exit(1);
+        }
+    };
+    let lower = dom.to_lowercase();
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    println!("  [visual] Checking document structure...");
+    if !lower.contains("<title>") || lower.contains("<title></title>") {
+        errors.push("missing <title>".into());
+    }
+    if !lower.contains("viewport") {
+        warnings.push("missing viewport meta (mobile rendering)".into());
+    }
+    if !lower.contains("<h1") {
+        warnings.push("no <h1> heading".into());
+    }
+    println!("  [visual] Checking image alt text...");
+    let imgs = lower.matches("<img").count();
+    let alts = lower.matches("alt=").count();
+    if imgs > alts {
+        errors.push(format!("{} <img> without alt text", imgs - alts));
+    }
+    println!("  [visual] Checking form labeling...");
+    let inputs = lower.matches("<input").count() + lower.matches("<textarea").count();
+    let labels = lower.matches("<label").count()
+        + lower.matches("aria-label").count()
+        + lower.matches("placeholder=").count();
+    if inputs > labels {
+        warnings.push(format!("{} input(s) without label/aria-label/placeholder", inputs - labels));
+    }
+    println!("  [capability] Scanning for leakage markers...");
+    for marker in ["api_key", "apikey", "x-api-key", "secret", "password\"", "bearer "] {
+        if lower.contains(marker) {
+            errors.push(format!("possible capability leakage marker in DOM: {marker}"));
+        }
+    }
     println!();
-    println!("Audit complete: PASS (0 errors, 0 warnings)");
+    for e in &errors { println!("  ERROR: {e}"); }
+    for w in &warnings { println!("  warn:  {w}"); }
+    if errors.is_empty() {
+        println!("Audit complete: PASS ({} errors, {} warnings)", errors.len(), warnings.len());
+    } else {
+        println!("Audit complete: FAIL ({} errors, {} warnings)", errors.len(), warnings.len());
+        std::process::exit(1);
+    }
 }
 
 fn cmd_screenshot(args: &[String]) {
     let url = parse_flag(args, "--url").unwrap_or("http://localhost:3000".into());
     let name = parse_flag(args, "--name").unwrap_or("screenshot".into());
     let output = parse_flag(args, "--output").unwrap_or("screenshots".into());
-    println!("Capturing screenshot: {name}");
+    println!("Capturing screenshots: {name}");
     println!("  URL: {url}");
-    println!("  Output: {output}/{name}.png");
-    println!("  Viewports: desktop (1280x720), mobile (390x844), tablet (768x1024)");
-    println!("Screenshot saved: {output}/{name}.png");
+    let viewports = [("desktop", 1280u32, 720u32), ("mobile", 390, 844), ("tablet", 768, 1024)];
+    let mut failed = false;
+    for (label, w, h) in viewports {
+        let path = format!("{output}/{name}-{label}.png");
+        match polish_visual::chrome::capture(&url, w, h, &path) {
+            Ok(()) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                println!("  saved {path} ({w}x{h}, {size} bytes)");
+            }
+            Err(e) => {
+                eprintln!("  FAILED {label} ({w}x{h}): {e}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 fn cmd_visual_diff(args: &[String]) {
     let baseline = parse_flag(args, "--baseline").unwrap_or("screenshots/baseline".into());
     let actual = parse_flag(args, "--actual").unwrap_or("screenshots/actual".into());
-    let threshold = parse_flag(args, "--threshold").unwrap_or("0.1".into());
-    println!("Running visual diff...");
-    println!("  Baseline: {baseline}");
-    println!("  Actual: {actual}");
-    println!("  Threshold: {threshold}%");
-    println!();
-    println!("Diff result: PASS (0.00% changed, threshold 0.1%)");
+    let threshold: f32 = parse_flag(args, "--threshold").unwrap_or("0.1".into()).parse().unwrap_or(0.1);
+    println!("Running visual diff (threshold {threshold}%)...");
+    let pairs: Vec<(String, String)> = if std::path::Path::new(&baseline).is_dir() {
+        let mut v = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&baseline) {
+            for e in entries.flatten() {
+                let fname = e.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".png") {
+                    v.push((format!("{baseline}/{fname}"), format!("{actual}/{fname}")));
+                }
+            }
+        }
+        v
+    } else {
+        vec![(baseline.clone(), actual.clone())]
+    };
+    if pairs.is_empty() {
+        eprintln!("Diff FAILED: no PNG baselines found in {baseline}");
+        std::process::exit(1);
+    }
+    let mut failed = false;
+    for (b, a) in pairs {
+        match polish_visual::diff::diff_files(&b, &a, threshold) {
+            Ok(r) => {
+                let status = if r.passed { "PASS" } else { "FAIL" };
+                println!("  {status} {b} vs {a}: {:.3}% changed ({}/{} px)", r.diff_percent, r.diff_pixels, r.total_pixels);
+                if !r.passed { failed = true; }
+            }
+            Err(e) => {
+                eprintln!("  FAIL {b} vs {a}: {e}");
+                failed = true;
+            }
+        }
+    }
+    if failed { std::process::exit(1); }
+    println!("Diff result: PASS");
 }
 
 fn cmd_agent(args: &[String]) {

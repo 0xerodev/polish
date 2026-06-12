@@ -75,3 +75,53 @@ impl VisualDiff {
 impl Default for VisualDiff {
     fn default() -> Self { Self::new(0.1) }
 }
+
+/// Real pixel comparison of two PNG files. Fail-closed: errors if either file
+/// is missing/unreadable; dimension mismatch counts as 100% different.
+pub fn diff_files(baseline: &str, actual: &str, threshold_percent: f32) -> anyhow::Result<DiffResult> {
+    fn load(path: &str) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+        let f = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("cannot open {path}: {e}"))?;
+        let decoder = png::Decoder::new(std::io::BufReader::new(f));
+        let mut reader = decoder.read_info()?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf)?;
+        buf.truncate(info.buffer_size());
+        Ok((buf, info.width, info.height))
+    }
+    let (b, bw, bh) = load(baseline)?;
+    let (a, aw, ah) = load(actual)?;
+    if (bw, bh) != (aw, ah) {
+        return Ok(DiffResult {
+            baseline_path: baseline.into(),
+            actual_path: actual.into(),
+            total_pixels: (bw as u64) * (bh as u64),
+            diff_pixels: (bw as u64) * (bh as u64),
+            diff_percent: 100.0,
+            regions: Vec::new(),
+            passed: false,
+            threshold_percent,
+        });
+    }
+    let px = b.len().min(a.len());
+    let stride = (b.len() / ((bw as usize) * (bh as usize))).max(1);
+    let mut diff_pixels: u64 = 0;
+    let total_pixels = (bw as u64) * (bh as u64);
+    for i in (0..px).step_by(stride) {
+        let end = (i + stride).min(px);
+        if b[i..end] != a[i..end] {
+            diff_pixels += 1;
+        }
+    }
+    let diff_percent = if total_pixels == 0 { 0.0 } else { (diff_pixels as f32 / total_pixels as f32) * 100.0 };
+    Ok(DiffResult {
+        baseline_path: baseline.into(),
+        actual_path: actual.into(),
+        total_pixels,
+        diff_pixels,
+        diff_percent,
+        regions: Vec::new(),
+        passed: diff_percent <= threshold_percent,
+        threshold_percent,
+    })
+}
