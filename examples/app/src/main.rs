@@ -100,8 +100,9 @@ fn nav(active: &str) -> String {
   <div style="display:flex;gap:1.5rem">
     {order}{docs}
   </div>
-  <div style="margin-left:auto;display:flex;gap:1rem;font-size:.75rem;color:var(--p-text2)"><span id="live-orders" title="updates live over SSE">orders: 0</span><span>v0.1.0</span></div>
+  <div style="margin-left:auto;display:flex;gap:1rem;font-size:.75rem;color:var(--p-text2)"><span id="live-orders" title="updates live over SSE">orders: {n}</span><span>v0.1.0</span></div>
 </nav>"#,
+        n = ORDER_COUNT.load(Ordering::Relaxed),
         order = link("/", "Order Form"),
         docs = link("/docs", "Docs"),
     )
