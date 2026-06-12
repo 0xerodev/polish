@@ -3,6 +3,9 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ORDER_COUNT: AtomicU64 = AtomicU64::new(0);
 
 use axum::{
     Router,
@@ -97,7 +100,7 @@ fn nav(active: &str) -> String {
   <div style="display:flex;gap:1.5rem">
     {order}{docs}
   </div>
-  <div style="margin-left:auto;font-size:.75rem;color:var(--p-text2)">v0.1.0</div>
+  <div style="margin-left:auto;display:flex;gap:1rem;font-size:.75rem;color:var(--p-text2)"><span id="live-orders" title="updates live over SSE">orders: 0</span><span>v0.1.0</span></div>
 </nav>"#,
         order = link("/", "Order Form"),
         docs = link("/docs", "Docs"),
@@ -115,6 +118,7 @@ fn themed_page(title: &str, body_html: &str, include_live: bool, active_nav: &st
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%232563eb%27/%3E%3Cpath d=%27M9 2 4 9h3l-1 5 5-7H8z%27 fill=%27white%27/%3E%3C/svg%3E">
   <title>{title}</title>
   <style>
 {css}
@@ -195,6 +199,8 @@ async fn submit_handler(
             if let ActionOutput::Replace { ref page_html } = r.outcome {
                 use polish_live::LiveFragment;
                 bus.fragment(LiveFragment::replace("result", page_html.clone()));
+                let n = ORDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                bus.fragment(LiveFragment::replace("live-orders", format!("orders: {n}")));
             }
             let html = match r.outcome {
                 ActionOutput::Replace { page_html } => page_html,

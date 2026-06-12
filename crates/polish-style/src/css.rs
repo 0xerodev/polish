@@ -139,6 +139,14 @@ impl StyleSheet {
             ("gap", "var(--p-sp-md)"),
         ]);
 
+        w.rule(".p-nav-link", &[
+            ("color", "var(--p-text2)"),
+            ("text-decoration", "none"),
+            ("font-size", "0.9rem"),
+            ("font-weight", "500"),
+            ("transition", "color 120ms ease"),
+        ]);
+        w.rule(".p-nav-link:hover", &[("color", "var(--p-text)")]);
         w.rule(".p-header-title", &[
             ("font-size", t.size_lg),
             ("font-weight", t.weight_semibold),
