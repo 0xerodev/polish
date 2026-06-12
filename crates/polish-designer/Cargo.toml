@@ -1,0 +1,14 @@
+[package]
+name = "polish-designer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "polish-designer"
+path = "src/main.rs"
+
+[dependencies]
+polish-core = { path = "../polish-core" }
+polish-style = { path = "../polish-style" }
+axum = { workspace = true }
+tokio = { workspace = true }

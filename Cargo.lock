@@ -891,6 +891,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "polish-designer"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "polish-core",
+ "polish-style",
+ "tokio",
+]
+
+[[package]]
 name = "polish-docs"
 version = "0.1.0"
 dependencies = [

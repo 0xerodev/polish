@@ -2,6 +2,7 @@
 members = [
     "crates/polish-core",
     "crates/polish-style",
+    "crates/polish-designer",
     "crates/polish-actions",
     "crates/polish-state",
     "crates/polish-capabilities",
