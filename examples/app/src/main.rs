@@ -38,7 +38,7 @@ struct AppState {
     openapi_json: Arc<String>,
 }
 
-const CSP: &str = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
+const CSP: &str = "default-src 'self'; img-src 'self' data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
 
 fn secure_html(status: StatusCode, html: String) -> Response {
     (
